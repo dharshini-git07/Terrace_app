@@ -3,10 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.routes import auth, monitor
 
-# ✅ create app (VERY IMPORTANT)
+
 app = FastAPI()
 
-# ✅ allow frontend connection
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,11 +14,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ✅ include routes
 app.include_router(auth.router)
 app.include_router(monitor.router)
 
-# ✅ test route
+
 @app.get("/")
-def home():
+def home() -> dict[str, str]:
     return {"message": "Backend Running Successfully"}
