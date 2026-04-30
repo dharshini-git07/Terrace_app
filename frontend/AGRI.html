@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Smart Agri App - Intelligent Farming Solutions</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-database-compat.js"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <style>
         * {
@@ -946,6 +948,24 @@
     <script>
         // GLOBAL VARIABLES
         const DEFAULT_BACKEND_URL = 'http://127.0.0.1:8000';
+        const HARDWARE_FIREBASE_CONFIG = {
+            apiKey: "AIzaSyBlsAFVWsg7kiIguqC1C45FtlzzaZYi0rE",
+            authDomain: "satf-de59f.firebaseapp.com",
+            databaseURL: "https://satf-de59f-default-rtdb.asia-southeast1.firebasedatabase.app",
+            projectId: "satf-de59f",
+            storageBucket: "satf-de59f.firebasestorage.app",
+            messagingSenderId: "849304165614",
+            appId: "1:849304165614:web:60100a86140fc3bbd0a7ff"
+        };
+        const HARDWARE_DATABASE_PATHS = [
+            'hardware',
+            'sensorData',
+            'sensors',
+            'monitor',
+            'monitoring',
+            'data',
+            '/'
+        ];
 
         function normalizeApiBaseUrl(url) {
             return url ? url.replace(/\/+$/, '') : '';
@@ -993,6 +1013,10 @@
         let timer = null;
         let sensorUpdateTimer = null;
         let waterUpdateTimer = null;
+        let hardwareDatabase = null;
+        let hardwareMonitorData = null;
+        let hardwareDataSource = 'Backend';
+        let hardwareLastUpdated = null;
         let timeLeft = 30;
         let sensorData = {
             moisture: 65,
@@ -1035,6 +1059,8 @@
 
         // AUTHENTICATION FUNCTIONS
         document.addEventListener('DOMContentLoaded', function() {
+            subscribeToHardwareDatabase();
+
             // Role selection
             document.querySelectorAll('.role-btn').forEach(btn => {
                 btn.addEventListener('click', function() {
@@ -1066,6 +1092,189 @@
             }
 
             return response.json();
+        }
+
+        function initializeHardwareDatabase() {
+            if (!window.firebase || !firebase.apps) {
+                console.warn('Firebase SDK not loaded; monitor data will use backend fallback.');
+                return null;
+            }
+
+            const existingApp = firebase.apps.find(app => app.name === 'hardware');
+            const hardwareApp = existingApp || firebase.initializeApp(HARDWARE_FIREBASE_CONFIG, 'hardware');
+            return firebase.database(hardwareApp);
+        }
+
+        function toFiniteNumber(value) {
+            if (value === null || value === undefined || value === '') {
+                return null;
+            }
+
+            const normalizedValue = typeof value === 'string'
+                ? value.replace('%', '').replace('Â°C', '').replace('°C', '').trim()
+                : value;
+            const numberValue = Number(normalizedValue);
+            return Number.isFinite(numberValue) ? numberValue : null;
+        }
+
+        function findReading(data, keys) {
+            if (!data || typeof data !== 'object') {
+                return null;
+            }
+
+            const normalizedKeys = keys.map(key => key.toLowerCase());
+            const queue = [data];
+
+            while (queue.length) {
+                const current = queue.shift();
+                if (!current || typeof current !== 'object') {
+                    continue;
+                }
+
+                for (const [key, value] of Object.entries(current)) {
+                    const normalizedKey = key.toLowerCase().replace(/[\s_-]/g, '');
+                    if (normalizedKeys.includes(normalizedKey)) {
+                        const numberValue = toFiniteNumber(value);
+                        if (numberValue !== null) {
+                            return numberValue;
+                        }
+                    }
+
+                    if (value && typeof value === 'object') {
+                        queue.push(value);
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        function normalizeHardwareMonitorData(rawData) {
+            if (!rawData || typeof rawData !== 'object') {
+                return null;
+            }
+
+            const soilMoisture = findReading(rawData, [
+                'soilmoisture',
+                'soilmoisturepercent',
+                'soil_moisture',
+                'moisture',
+                'moisturepercent',
+                'soil',
+                'soilwater',
+                'soilwaterlevel'
+            ]);
+            const temperature = findReading(rawData, [
+                'temperature',
+                'temp',
+                'fieldtemperature',
+                'temperaturec',
+                'temperaturecelsius',
+                'airtemperature',
+                'airtemp'
+            ]);
+            const humidity = findReading(rawData, [
+                'humidity',
+                'airhumidity',
+                'humiditypercent',
+                'hum'
+            ]);
+
+            if (soilMoisture === null && temperature === null && humidity === null) {
+                return null;
+            }
+
+            return {
+                soil_moisture: Math.round(soilMoisture ?? sensorData.moisture ?? 65),
+                temperature: Math.round(temperature ?? sensorData.temperature ?? 28),
+                humidity: Math.round(humidity ?? 70)
+            };
+        }
+
+        function subscribeToHardwareDatabase() {
+            hardwareDatabase = initializeHardwareDatabase();
+
+            if (!hardwareDatabase) {
+                return;
+            }
+
+            HARDWARE_DATABASE_PATHS.forEach(path => {
+                hardwareDatabase.ref(path).on('value', snapshot => {
+                    const monitorData = normalizeHardwareMonitorData(snapshot.val());
+                    if (!monitorData) {
+                        return;
+                    }
+
+                    hardwareMonitorData = monitorData;
+                    hardwareDataSource = `Firebase RTDB: ${path}`;
+                    hardwareLastUpdated = new Date();
+                    applyMonitorDataToVisibleCards(monitorData);
+                }, error => {
+                    console.warn(`Unable to read hardware data at "${path}"`, error);
+                });
+            });
+        }
+
+        async function getLiveMonitorData() {
+            if (hardwareMonitorData) {
+                return hardwareMonitorData;
+            }
+
+            try {
+                const snapshot = await hardwareDatabase?.ref('/').once('value');
+                const monitorData = normalizeHardwareMonitorData(snapshot?.val());
+                if (monitorData) {
+                    hardwareMonitorData = monitorData;
+                    hardwareDataSource = 'Firebase RTDB';
+                    hardwareLastUpdated = new Date();
+                    return monitorData;
+                }
+            } catch (error) {
+                console.warn('Unable to load hardware monitor data from Firebase', error);
+            }
+
+            hardwareDataSource = 'Backend';
+            return apiRequest('/monitor/data');
+        }
+
+        function applyMonitorDataToVisibleCards(monitorData) {
+            sensorData.moisture = monitorData.soil_moisture;
+            sensorData.temperature = monitorData.temperature;
+            sensorData.soilPh = (6.0 + (monitorData.humidity % 15) / 10).toFixed(1);
+            sensorData.sunlight = Math.round(Math.min(100, Math.max(45, 100 - monitorData.humidity / 2)));
+
+            const moistureElement = document.getElementById('moistureValue');
+            const tempElement = document.getElementById('tempValue');
+            const phElement = document.getElementById('phValue');
+            const sunlightElement = document.getElementById('sunlightValue');
+            const humidityElement = document.getElementById('humidityValue');
+            const sourceElement = document.getElementById('monitorDataSource');
+            const updatedElement = document.getElementById('monitorLastUpdated');
+            const dashboardTempElement = document.getElementById('dashboardTempValue');
+            const dashboardMoistureElement = document.getElementById('dashboardMoistureValue');
+            const dashboardHumidityElement = document.getElementById('dashboardHumidityValue');
+            const dashboardHumidityText = document.getElementById('dashboardHumidityText');
+            const dashboardAlertReading = document.getElementById('dashboardAlertReading');
+            const tankLevelElement = document.getElementById('tankLevel');
+            const tankLevelBar = document.getElementById('tankLevelBar');
+            const tankStatusElement = document.getElementById('tankStatusText');
+            const tankLevel = Math.max(25, Math.min(95, monitorData.humidity));
+
+            if (moistureElement) moistureElement.textContent = `${sensorData.moisture}%`;
+            if (tempElement) tempElement.textContent = `${sensorData.temperature}Â°C`;
+            if (phElement) phElement.textContent = sensorData.soilPh;
+            if (sunlightElement) sunlightElement.textContent = `${sensorData.sunlight}%`;
+            if (humidityElement) humidityElement.textContent = `${monitorData.humidity}%`;
+            if (sourceElement) sourceElement.textContent = hardwareDataSource;
+            if (updatedElement) updatedElement.textContent = hardwareLastUpdated ? hardwareLastUpdated.toLocaleTimeString() : 'Waiting...';
+            if (dashboardTempElement) dashboardTempElement.textContent = `${monitorData.temperature}Â°C`;
+            if (dashboardMoistureElement) dashboardMoistureElement.textContent = `${monitorData.soil_moisture}%`;
+            if (dashboardHumidityElement) dashboardHumidityElement.textContent = `${monitorData.humidity}%`;
+            if (dashboardHumidityText) dashboardHumidityText.textContent = `Humidity ${monitorData.humidity}%`;
+            if (dashboardAlertReading) dashboardAlertReading.textContent = `Temperature ${monitorData.temperature}Â°C and soil moisture ${monitorData.soil_moisture}% from the live Firebase hardware feed.`;
+            if (tankLevelElement) tankLevelElement.textContent = `${tankLevel}%`;
+            if (tankLevelBar) tankLevelBar.style.width = `${tankLevel}%`;
+            if (tankStatusElement) tankStatusElement.textContent = tankLevel > 60 ? 'Good Level' : tankLevel > 35 ? 'Moderate Level' : 'Low Level';
         }
 
         function getRoleLabel(role) {
@@ -1607,7 +1816,7 @@
 
             try {
                 [monitorData, plantHealth, waterAction] = await Promise.all([
-                    apiRequest('/monitor/data'),
+                    getLiveMonitorData(),
                     apiRequest('/monitor/plant-health'),
                     apiRequest('/monitor/water-management')
                 ]);
@@ -1654,7 +1863,31 @@
                             <div class="health-bar">
                                 <div class="health-fill" style="width: ${sustainabilityScore}%"></div>
                             </div>
-                            <div class="health-text">Humidity ${monitorData.humidity}%</div>
+                            <div class="health-text" id="dashboardHumidityText">Humidity ${monitorData.humidity}%</div>
+                        </div>
+                    </div>
+
+                    <div class="dashboard-card">
+                        <div class="card-header">
+                            <div class="card-title">Live Hardware Data</div>
+                            <div class="card-icon"><i class="fas fa-microchip"></i></div>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; text-align: center; gap: 12px; padding: 10px 0;">
+                            <div>
+                                <div style="font-size: 22px; font-weight: 600;" id="dashboardTempValue">${monitorData.temperature}Â°C</div>
+                                <div style="color: #666; font-size: 13px;">Temperature</div>
+                            </div>
+                            <div>
+                                <div style="font-size: 22px; font-weight: 600;" id="dashboardMoistureValue">${monitorData.soil_moisture}%</div>
+                                <div style="color: #666; font-size: 13px;">Moisture</div>
+                            </div>
+                            <div>
+                                <div style="font-size: 22px; font-weight: 600;" id="dashboardHumidityValue">${monitorData.humidity}%</div>
+                                <div style="color: #666; font-size: 13px;">Humidity</div>
+                            </div>
+                        </div>
+                        <div style="color: #666; font-size: 13px; text-align: center;">
+                            <span id="monitorDataSource">${hardwareDataSource}</span>
                         </div>
                     </div>
 
@@ -1675,7 +1908,7 @@
                                 <div class="alert-icon"><i class="fas fa-leaf"></i></div>
                                 <div class="alert-content">
                                     <div class="alert-title">Plant Health: ${plantHealth.plant_health}</div>
-                                    <div class="alert-message">Temperature ${monitorData.temperature}°C and soil moisture ${monitorData.soil_moisture}% from the live backend feed.</div>
+                                    <div class="alert-message" id="dashboardAlertReading">Temperature ${monitorData.temperature}°C and soil moisture ${monitorData.soil_moisture}% from the live Firebase hardware feed.</div>
                                 </div>
                             </div>
                         </div>
@@ -1690,7 +1923,7 @@
                             <div style="font-size: 48px; margin-bottom: 10px;">Active</div>
                             <div style="font-weight: 600; color: #2e7d32;">Connected</div>
                             <div style="color: #666; font-size: 14px; margin-top: 5px;">
-                                Backend monitoring and recommendation endpoints are responding
+                                Firebase hardware data with backend recommendations
                             </div>
                         </div>
                     </div>
@@ -1767,7 +2000,7 @@
 
             try {
                 [monitorData, plantHealth, waterAction] = await Promise.all([
-                    apiRequest('/monitor/data'),
+                    getLiveMonitorData(),
                     apiRequest('/monitor/plant-health'),
                     apiRequest('/monitor/water-management')
                 ]);
@@ -1824,10 +2057,20 @@
                                 <div class="sensor-label">Sunlight</div>
                             </div>
                             <div class="sensor-card">
+                                <div class="sensor-icon"><i class="fas fa-cloud"></i></div>
+                                <div class="sensor-value" id="humidityValue">${monitorData.humidity}%</div>
+                                <div class="sensor-label">Humidity</div>
+                            </div>
+                            <div class="sensor-card">
                                 <div class="sensor-icon"><i class="fas fa-heart"></i></div>
                                 <div class="sensor-value" id="healthValue">${plantHealth.plant_health}</div>
                                 <div class="sensor-label">Plant Health</div>
                             </div>
+                        </div>
+                        <div style="margin-top: 12px; color: #666; font-size: 13px; text-align: center;">
+                            Data source: <span id="monitorDataSource">${hardwareDataSource}</span>
+                            <br>
+                            Last updated: <span id="monitorLastUpdated">${hardwareLastUpdated ? hardwareLastUpdated.toLocaleTimeString() : 'Waiting...'}</span>
                         </div>
                     </div>
                 </div>
@@ -1843,7 +2086,7 @@
                             <div class="alert-icon"><i class="fas fa-check-circle"></i></div>
                             <div class="alert-content">
                                 <div class="alert-title">Plant Health: ${plantHealth.plant_health}</div>
-                                <div class="alert-message">Live backend analysis based on the latest sensor reading.</div>
+                                <div class="alert-message">Live analysis based on the latest Firebase hardware reading.</div>
                             </div>
                         </div>
 
@@ -1883,7 +2126,7 @@
 
                 try {
                     const [monitorData, plantHealth] = await Promise.all([
-                        apiRequest('/monitor/data'),
+                        getLiveMonitorData(),
                         apiRequest('/monitor/plant-health')
                     ]);
 
@@ -1925,7 +2168,7 @@
 
             try {
                 [monitorData, waterAction] = await Promise.all([
-                    apiRequest('/monitor/data'),
+                    getLiveMonitorData(),
                     apiRequest('/monitor/water-management')
                 ]);
             } catch (error) {
@@ -1977,7 +2220,7 @@
                                 <div class="health-bar">
                                     <div class="health-fill" id="tankLevelBar" style="width: ${tankLevel}%; background: linear-gradient(90deg, #2196f3, #03a9f4);"></div>
                                 </div>
-                                <div class="health-text">${tankLevel > 60 ? 'Good Level' : tankLevel > 35 ? 'Moderate Level' : 'Low Level'}</div>
+                                <div class="health-text" id="tankStatusText">${tankLevel > 60 ? 'Good Level' : tankLevel > 35 ? 'Moderate Level' : 'Low Level'}</div>
                             </div>
                         </div>
                     </div>
@@ -2104,7 +2347,7 @@
                 }
 
                 try {
-                    const monitorData = await apiRequest('/monitor/data');
+                    const monitorData = await getLiveMonitorData();
                     const tankLevel = Math.max(25, Math.min(95, monitorData.humidity));
                     const tankLevelElement = document.getElementById('tankLevel');
                     const tankLevelBar = document.getElementById('tankLevelBar');
